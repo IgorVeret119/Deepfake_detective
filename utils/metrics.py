@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 class DiceLoss(nn.Module):
     """
@@ -222,3 +223,44 @@ class AICScoreMetric:
             aic = (2.0 * dice_pos * component2) / (dice_pos + component2)
             
         return aic, dice_pos, fpr_neg
+
+class BoundaryLoss(nn.Module):
+    """
+    Функция потерь, которая усиливает штраф за ошибки на границах маски.
+    Она находит контур маски и умножает ошибку (BCE) в этой зоне на заданный коэффициент.
+    """
+    def __init__(self, boundary_weight=5.0, boundary_thickness=5):
+        super().__init__()
+        self.boundary_weight = boundary_weight
+        self.kernel_size = boundary_thickness
+        self.padding = boundary_thickness // 2
+
+    def get_boundary(self, x):
+        """
+        Извлекает контур объекта с помощью морфологических операций на тензорах.
+        x: тензор с истинной маской (0 - фон, 1 - объект)
+        """
+        # Расширение маски (Dilation)
+        dilated = F.max_pool2d(x, kernel_size=self.kernel_size, stride=1, padding=self.padding)
+        
+        # Сужение маски (Erosion)
+        eroded = -F.max_pool2d(-x, kernel_size=self.kernel_size, stride=1, padding=self.padding)
+        
+        # Граница — это разница между расширенной и суженной маской
+        boundary = dilated - eroded
+        return boundary
+
+    def forward(self, pred, target):
+        # Базовая кросс-энтропия для каждого пикселя (без усреднения)
+        bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+        
+        # Получаем карту границ (тензор, где на границах 1, а в остальных местах 0)
+        boundary_map = self.get_boundary(target)
+        
+        # Создаем карту весов. Обычные пиксели имеют вес 1, пограничные — вес 1 + boundary_weight
+        weight_map = 1.0 + (boundary_map * self.boundary_weight)
+        
+        # Умножаем ошибку каждого пикселя на его вес и усредняем
+        loss = (bce * weight_map).mean()
+        
+        return loss

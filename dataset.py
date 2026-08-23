@@ -3,6 +3,8 @@ from torch.utils.data import Dataset
 from torchvision.io import read_image
 import torchvision.transforms.functional as F_vision
 
+import config
+
 # ==========================================
 # Классы для аугментации данных
 # ==========================================
@@ -128,29 +130,27 @@ class TrainPhotosDataset(Dataset):
     def __getitem__(self, idx):
         img_path, mask_path = self.data_list[idx]
 
-        # 1. Загрузка изображений с диска
+        # Загрузка изображений с диска
         image = read_image(img_path)
         mask = read_image(mask_path)
 
-        # 2. ПРИНУДИТЕЛЬНЫЙ РЕСАЙЗ (Приводим все картинки к размеру 512x512)
-        # Картинку ресайзим плавно (с антиалиасингом)
-        image = F_vision.resize(image, [512, 512], antialias=True)
-        # Маску ресайзим методом "ближайшего соседа" (NEAREST), чтобы не размыть нули и единицы
-        mask = F_vision.resize(mask, [512, 512], interpolation=F_vision.InterpolationMode.NEAREST)
+        # ПРИНУДИТЕЛЬНЫЙ РЕСАЙЗ ИЗ КОНФИГА
+        image = F_vision.resize(image, config.IMAGE_SIZE, antialias=True)
+        mask = F_vision.resize(mask, config.IMAGE_SIZE, interpolation=F_vision.InterpolationMode.NEAREST)
 
-        # 3. Перевод в float32 и нормализация в диапазон [0, 1]
+        # Перевод в float32 и нормализация в диапазон [0, 1]
         image = image.float() / 255.0
         mask = mask.float() / 255.0
 
-        # 4. Нормализация ImageNet
+        # Нормализация ImageNet
         image = F_vision.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-        # 5. Подготовка маски (только 1 канал, бинаризация)
+        # Подготовка маски
         if mask.shape[0] > 1:
             mask = mask[0:1, ...] 
         mask = (mask > 0.5).float()
 
-        # 6. Применение аугментаций
+        # Применение аугментаций
         for transform in self.transforms:
             image, mask = transform(image, mask)
 

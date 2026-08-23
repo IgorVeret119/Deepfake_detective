@@ -7,17 +7,14 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-# Импорты локальных модулей
-from models import UNet, Link_net
-from utils.metrics import DiceLoss, IoUScore, SoftIoULoss, CombinedLoss, AICScoreMetric
+# Импорт конфигурации и локальных модулей
+import config
+from utils.metrics import DiceLoss, IoUScore, SoftIoULoss, CombinedLoss, AICScoreMetric, BoundaryLoss
 from utils.cloud import CloudManager
 from dataset import TrainPhotosDataset, RandomHorizontal, RandomCrop, RandomBright
-
+from models.unet import UNet, ForgeryDetectionModel
 
 class Trainer:
-    """
-    Универсальный класс для обучения моделей сегментации.
-    """
     def __init__(self, model, train_loader, val_loader, loss_fn, metric_fn, 
                  optimizer, device, log_dir=None, cloud_manager=None):
         self.model = model.to(device)
@@ -66,7 +63,9 @@ class Trainer:
         self.model.train()
         total_loss = 0
         
-        for X, y in tqdm(self.train_loader, desc="Обучение"):
+        # tqdm с выводом Loss в реальном времени
+        pbar = tqdm(self.train_loader, desc="Обучение")
+        for X, y in pbar:
             X, y = X.to(self.device), y.to(self.device)
             
             pred = self.model(X)
@@ -77,6 +76,7 @@ class Trainer:
             self.optimizer.step()
             
             total_loss += loss.item()
+            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
             
             if self.writer:
                 with torch.no_grad():
@@ -90,8 +90,7 @@ class Trainer:
         val_loss = 0
         count = 0
         
-        # Используем кастомную метрику AIC Score
-        aic_metric = AICScoreMetric(threshold=0.8)
+        aic_metric = AICScoreMetric(threshold=config.THRESHOLD)
         
         with torch.no_grad():
             for X, y in tqdm(self.val_loader, desc="Валидация"):
@@ -100,8 +99,6 @@ class Trainer:
                 
                 pred = self.model(X)
                 val_loss += self.loss_fn(pred, y).item()
-                
-                # Накопление статистики для AIC Score
                 aic_metric.update(pred, y)
                 
         final_aic, dice_pos, fpr_neg = aic_metric.compute()
@@ -122,7 +119,7 @@ class Trainer:
         with torch.no_grad():
             for n, (X, y) in enumerate(self.etalone_samples, 1):
                 pred = self.model(X.unsqueeze(0).to(self.device))
-                pred = (torch.sigmoid(pred) > 0.8).float()
+                pred = (torch.sigmoid(pred) > config.THRESHOLD).float()
                 
                 self.writer.add_image(f'Images/example_{n}/Image', X, step, dataformats='CHW')
                 self.writer.add_image(f'Images/example_{n}/Mask', y, step, dataformats='CHW')
@@ -130,83 +127,87 @@ class Trainer:
 
 
 def main():
-    # 1. Настройка окружения
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Используемое устройство: {device}")
+    print(f"Используемое устройство: {config.DEVICE}")
     
-    TOKEN = "y0__wgBEOqqzbcEGIesRyC5wf_SGDDNzNLrB1UKpR0S6zv56ylh9XeIO-G_bAgG"
-    
-    # 2. Подготовка данных с диска D:
-    base_dir = r"D:\train_stage1 (1)\stage1"
-    csv_path = os.path.join(base_dir, "train.csv")
-    
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Не найден файл разметки по пути: {csv_path}")
+    if not os.path.exists(config.CSV_PATH):
+        raise FileNotFoundError(f"Не найден файл разметки по пути: {config.CSV_PATH}")
 
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(config.CSV_PATH)
     
-    # Собираем абсолютные пути к картинкам и маскам
     data_list = []
     for _, row in df.iterrows():
         img_p = row['chng_img_path']
         mask_p = row['gt_path']
         
-        # Умная очистка: если путь в таблице начинается с "stage1/", отрезаем это
         if img_p.startswith('stage1/') or img_p.startswith('stage1\\'):
             img_p = img_p[7:]
         if mask_p.startswith('stage1/') or mask_p.startswith('stage1\\'):
             mask_p = mask_p[7:]
             
-        # Теперь безопасно склеиваем с базовой папкой
         if not os.path.isabs(img_p):
-            img_p = os.path.join(base_dir, img_p)
+            img_p = os.path.join(config.BASE_DIR, img_p)
         if not os.path.isabs(mask_p):
-            mask_p = os.path.join(base_dir, mask_p)
+            mask_p = os.path.join(config.BASE_DIR, mask_p)
             
         data_list.append((img_p, mask_p))
 
-    train_list, test_list = train_test_split(data_list, test_size=0.2, random_state=42)
+    train_list, test_list = train_test_split(data_list, test_size=config.TEST_SPLIT, random_state=42)
 
-    # 3. Настройка DataLoaders
+    p = config.AUGMENT_PROB
     train_dataset = TrainPhotosDataset(
         data_list=train_list,
-        transforms=[RandomHorizontal(0.25), RandomCrop(0.25), RandomBright(0.25)]
+        transforms=[RandomHorizontal(p), RandomCrop(p), RandomBright(p)]
     )
     test_dataset = TrainPhotosDataset(data_list=test_list)
 
-    train_loader = DataLoader(train_dataset, batch_size=8, num_workers=0, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=8, num_workers=0, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS, shuffle=False)
 
-    # 4. Настройка облака
     try:
-        if TOKEN:
-            cloud = CloudManager(token=TOKEN, remote_base_path='/IoU')
+        if config.YADISK_TOKEN:
+            cloud = CloudManager(token=config.YADISK_TOKEN, remote_base_path='/IoU')
         else:
             cloud = None
     except Exception as e:
         print(f"Работаем без облака. Ошибка: {e}")
         cloud = None
 
-    # 5. Эксперимент: Обучение U-Net
-    model_unet = UNet(num_classes=1, num_blocks=4)
-    optimizer_unet = torch.optim.Adam(model_unet.parameters(), lr=0.00001)
+    # ==========================================
+    # ВЫБОР МОДЕЛИ НА ОСНОВЕ КОНФИГА
+    # ==========================================
+    print(f"Инициализация модели: {config.MODEL_NAME}")
     
-    trainer_unet = Trainer(
-        model=model_unet,
+    if config.MODEL_NAME == "CustomUNet":
+        print("Используется кастомный U-Net (VGG13)")
+        model = UNet(num_classes=config.NUM_CLASSES, num_blocks=config.NUM_BLOCKS)
+        log_name = f"CustomUNet_VGG13"
+        
+    elif config.MODEL_NAME == "SMP":
+        print(f"Используется современная архитектура с энкодером: {config.SMP_ENCODER}")
+        model = ForgeryDetectionModel(encoder_name=config.SMP_ENCODER, num_classes=config.NUM_CLASSES)
+        log_name = f"SMP_{config.SMP_ENCODER}"
+        
+    else:
+        raise ValueError(f"Неизвестное имя модели в конфиге: {config.MODEL_NAME}")
+        
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
+    
+    trainer = Trainer(
+        model=model,
         train_loader=train_loader,
         val_loader=test_loader,
-        loss_fn=CombinedLoss(torch.nn.BCEWithLogitsLoss(), SoftIoULoss(reduction='mean')),
-        metric_fn=AICScoreMetric(threshold=0.8),
-        optimizer=optimizer_unet,
-        device=device,
-        log_dir='logs/UNet_AICScore',
+        # Если вы уже добавили BoundaryLoss, используйте его, иначе оставьте ваш CombinedLoss
+        loss_fn=CombinedLoss(BoundaryLoss(boundary_weight=5.0), SoftIoULoss(reduction='mean')),
+        metric_fn=AICScoreMetric(threshold=config.THRESHOLD),
+        optimizer=optimizer,
+        device=config.DEVICE,
+        log_dir=os.path.join(config.LOG_DIR, log_name), # Папки логов теперь будут называться автоматически
         cloud_manager=cloud
     )
     
     t_start = time.time()
-    trainer_unet.train(epochs=5)
+    trainer.train(epochs=config.EPOCHS)
     print(f"Обучение завершено за {time.time() - t_start:.2f} сек.")
-
 
 if __name__ == "__main__":
     main()
