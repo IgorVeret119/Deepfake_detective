@@ -6,10 +6,17 @@ import torch
 # ==========================================
 BASE_DIR = r"D:\train_stage1 (1)\stage1"
 CSV_PATH = os.path.join(BASE_DIR, "train.csv")
-LOG_DIR = "logs/UNet_AICScore"
+# Базовая папка для логов (скорее всего, она у вас уже есть)
+LOG_DIR = "logs"
+
+# Путь для сохранения итоговых весов модели (.pth)
+MODEL_SAVE_DIR = "logs/saved_models"
+
+# Путь для сохранения чекпоинтов перед отправкой в облако
+CHECKPOINT_DIR = "logs/checkpoints"
 
 # Токен облака (если используется)
-YADISK_TOKEN = "y0__wgBEOqqzbcEGIesRyC5wf_SGDDNzNLrB1UKpR0S6zv56ylh9XeIO-G_bAgG" 
+YADISK_TOKEN = "y0__wgBEOqqzbcEGIesRyC5wf_SGDDNzNLrB1UKpR0S6zv56ylh9XeIO-G_bAgG"
 
 # ==========================================
 # ГИПЕРПАРАМЕТРЫ ДАННЫХ

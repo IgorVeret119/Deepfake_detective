@@ -1,6 +1,8 @@
 import os
 import torch
 import yadisk
+import tempfile
+import config
 
 class CloudManager:
     """
@@ -47,30 +49,39 @@ class CloudManager:
 
         return start_epoch
 
-    def save_checkpoint(self, epoch, model, optimizer, val_loss, val_iou):
-        """
-        Сохраняет текущее состояние локально, а затем отправляет на Яндекс Диск.
-        """
-        local_path = f"/tmp/checkpoint_epoch_{epoch}.pth"
-        remote_path = f"{self.remote_base_path}/checkpoint_epoch_{epoch}.pth"
-        remote_latest = f"{self.remote_base_path}/checkpoint_latest.pth"
-
-        # Сохраняем локально
+    def save_checkpoint(self, epoch, model, optimizer, val_loss, val_metric):        
+        # 1. Берем локальную папку для чекпоинтов из конфига
+        local_dir = config.CHECKPOINT_DIR
+        os.makedirs(local_dir, exist_ok=True)
+        
+        # 2. Формируем путь к файлу (теперь без /tmp, работает и на Windows, и на Linux)
+        save_path = os.path.join(local_dir, f"checkpoint_epoch_{epoch}.pth")
+        
+        # 3. Сохраняем все важные данные (веса, шаг оптимизатора, метрики)
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': val_loss,
-            'iou': val_iou,
-        }, local_path)
+            'val_loss': val_loss,
+            'val_metric': val_metric
+        }, save_path)
+        
+        print(f"[*] Чекпоинт сохранен локально: {save_path}")
 
-        # Отправляем на диск (как архивную копию и как latest)
-        self.client.upload(local_path, remote_path, overwrite=True)
-        self.client.upload(local_path, remote_latest, overwrite=True)
-        print(f"Чекпоинт эпохи {epoch} сохранен на Яндекс Диск.")
-
-        # Удаляем временный локальный файл
-        os.remove(local_path)
+        # 4. Загружаем файл в облако (если клиент настроен)
+        try:
+            remote_path = f"{self.remote_base_path}/checkpoint_epoch_{epoch}.pth"
+            
+            # Если вы используете библиотеку yadisk, отправка выглядит примерно так:
+            if hasattr(self, 'client') and self.client.check_token():
+                self.client.upload(save_path, remote_path, overwrite=True)
+                print(f"[*] Чекпоинт успешно отправлен в облако: {remote_path}")
+            else:
+                print("[!] Подключение к облаку отсутствует. Модель сохранена только локально.")
+                
+        except Exception as e:
+            print(f"[!] Ошибка при загрузке в облако: {e}")
+            print(f"[*] Не переживайте, веса в безопасности на вашем диске: {save_path}")
 
     def sync_logs(self, local_log_dir):
         """

@@ -40,10 +40,31 @@ class Trainer:
             train_loss = self._train_epoch(epoch)
             val_loss, val_metric = self._validate_epoch(epoch)
             
+            # ==========================================
+            # НОВОЕ: ЛОКАЛЬНОЕ СОХРАНЕНИЕ ВЕСОВ
+            # ==========================================
+            if self.writer: # Сохраняем в папку логов
+                save_dir = self.writer.log_dir
+            else:
+                save_dir = config.MODEL_SAVE_DIR
+                
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
+            
+            # Сохраняем веса модели
+            torch.save(self.model.state_dict(), save_path)
+            print(f"[*] Веса сохранены локально: {save_path}")
+            # ==========================================
+
             if self.cloud_manager:
-                self.cloud_manager.save_checkpoint(
-                    epoch, self.model, self.optimizer, val_loss, val_metric
-                )
+                # Обернули сохранение чекпоинта в try-except
+                try:
+                    self.cloud_manager.save_checkpoint(
+                        epoch, self.model, self.optimizer, val_loss, val_metric
+                    )
+                except Exception as e:
+                    print(f"[!] Не удалось отправить чекпоинт в облако: {e}")
+                    print("[!] Обучение продолжается...")
                 
             if self.writer:
                 self.writer.add_scalar('Loss/test_step', val_loss, self.global_step)
@@ -51,7 +72,11 @@ class Trainer:
                 self._log_predictions(step=self.global_step)
                 
                 if self.cloud_manager:
-                    self.cloud_manager.sync_logs(self.writer.log_dir)
+                    # Обернули синхронизацию логов в try-except
+                    try:
+                        self.cloud_manager.sync_logs(self.writer.log_dir)
+                    except Exception as e:
+                        print(f"[!] Не удалось синхронизировать логи с облаком: {e}")
 
         if self.writer:
             self.writer.close()
