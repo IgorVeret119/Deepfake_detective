@@ -1,11 +1,12 @@
-import os
+from pathlib import Path
+
 import torch
 
 # ==========================================
 # ПУТИ И ДИРЕКТОРИИ
 # ==========================================
-BASE_DIR = r"D:\train_stage1 (1)\stage1"
-CSV_PATH = os.path.join(BASE_DIR, "train.csv")
+BASE_DIR = Path("stage1")
+CSV_PATH = BASE_DIR / "train.csv"
 # Базовая папка для логов (скорее всего, она у вас уже есть)
 LOG_DIR = "logs"
 
@@ -27,12 +28,16 @@ NUM_WORKERS = 0
 TEST_SPLIT = 0.2
 AUGMENT_PROB = 0.25
 
+# Максимальный размер изображений в пикселях, т.е. высота * ширину
+# При значении -1 фильтрация не выполняется
+MAX_INPUT_IMAGE_SIZE = 800 * 800
+
 # ==========================================
 # ГИПЕРПАРАМЕТРЫ ОБУЧЕНИЯ
 # ==========================================
 EPOCHS = 5
 LEARNING_RATE = 1e-5
-THRESHOLD = 0.8 # Порог для метрики AIC Score
+THRESHOLD = 0.8  # Порог для метрики AIC Score
 
 # ==========================================
 # НАСТРОЙКИ АРХИТЕКТУРЫ
@@ -41,13 +46,13 @@ THRESHOLD = 0.8 # Порог для метрики AIC Score
 MODEL_NAME = "BiRefNet"
 
 # Если выбрали "SMP", какой энкодер использовать? (варианты: "mit_b0", "efficientnet-b0")
-SMP_ENCODER = "mit_b0" 
+SMP_ENCODER = "mit_b0"
 
 # Общие параметры
 NUM_CLASSES = 1
-NUM_BLOCKS = 4 # Используется только для CustomUNet
+NUM_BLOCKS = 4  # Используется только для CustomUNet
 
 # ==========================================
 # СИСТЕМНЫЕ НАСТРОЙКИ
 # ==========================================
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
