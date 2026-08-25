@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from copy import deepcopy
 from torchvision.models import vgg13, VGG13_Weights
 import segmentation_models_pytorch as smp
+from transformers import AutoModelForImageSegmentation
+import timm
 
 class SRMLayer(nn.Module):
     """
@@ -251,3 +253,84 @@ class UNet(nn.Module):
         x_out = self.final(x_out)
         
         return x_out
+
+class BiRefNetForgeryModel(nn.Module):
+    """
+    Интеграция SOTA модели BiRefNet с нашим SRM-фильтром.
+    """
+    def __init__(self):
+        super().__init__()
+        self.srm = SRMLayer()
+        
+        # Адаптер: сжимает 6 каналов (3 RGB + 3 Шум) в 3 канала, которые понимает BiRefNet
+        self.input_adapter = nn.Conv2d(6, 3, kernel_size=1)
+        
+        # Загружаем саму модель из Hugging Face
+        # trust_remote_code=True обязателен для кастомных архитектур
+        self.model = AutoModelForImageSegmentation.from_pretrained(
+            "ZhengPeng7/BiRefNet", 
+            trust_remote_code=True
+        )
+
+    def forward(self, x):
+        noise = self.srm(x)
+        x_combined = torch.cat([x, noise], dim=1)
+        
+        # Адаптируем под 3 канала (пока это float32)
+        x_adapted = self.input_adapter(x_combined)
+        
+        # [ИСПРАВЛЕНИЕ]: Узнаем, в каком формате веса у BiRefNet (float16), 
+        # и принудительно переводим нашу картинку в этот же формат
+        model_dtype = next(self.model.parameters()).dtype
+        x_adapted = x_adapted.to(dtype=model_dtype)
+        
+        # Теперь форматов конфликта не будет
+        preds = self.model(x_adapted)
+        
+        if isinstance(preds, (list, tuple)):
+            return preds[0]
+        elif isinstance(preds, dict):
+            return preds['preds']
+            
+        return preds
+
+
+class ViTSegmentation(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Загружаем ViT БЕЗ головы классификации (num_classes=0)
+        self.encoder = timm.create_model(
+            'vit_small_patch16_384.augreg_in21k_ft_in1k', 
+            pretrained=True, 
+            num_classes=0
+        )
+        
+        # Простой Декодер
+        # У vit_small толщина признаков (embed_dim) равна 384
+        self.decoder = nn.Sequential(
+            nn.Conv2d(384, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False), # Увеличиваем в 4 раза
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False), # Еще в 4 раза (итого х16)
+            nn.Conv2d(64, 1, kernel_size=1) # 1 канал для маски (фейк)
+        )
+
+    def forward(self, x):
+        # 1. Получаем сырые токены из энкодера
+        features = self.encoder.forward_features(x)
+        
+        # 2. Выкидываем CLS-токен (он идет под нулевым индексом)
+        patch_tokens = features[:, 1:, :] 
+        
+        # 3. Собираем токены в 2D-сетку
+        B, N, C = patch_tokens.shape
+        grid_size = int(N ** 0.5) # Для 384x384 это будет 24
+        
+        # Меняем форму: [Batch, Channels, Height, Width]
+        spatial_features = patch_tokens.transpose(1, 2).reshape(B, C, grid_size, grid_size)
+        
+        # 4. Пропускаем через декодер для получения маски 384x384
+        mask = self.decoder(spatial_features)
+        return mask

@@ -6,13 +6,14 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from utils.augmentations import get_train_transforms, get_val_transforms
 
 # Импорт конфигурации и локальных модулей
 import config
 from utils.metrics import DiceLoss, IoUScore, SoftIoULoss, CombinedLoss, AICScoreMetric, BoundaryLoss
 from utils.cloud import CloudManager
 from dataset import TrainPhotosDataset, RandomHorizontal, RandomCrop, RandomBright
-from models.unet import UNet, ForgeryDetectionModel
+from models.unet import UNet, ForgeryDetectionModel, BiRefNetForgeryModel, ViTSegmentation
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, loss_fn, metric_fn, 
@@ -178,12 +179,20 @@ def main():
 
     train_list, test_list = train_test_split(data_list, test_size=config.TEST_SPLIT, random_state=42)
 
-    p = config.AUGMENT_PROB
+    # Создаем объекты трансформаций
+    train_transform = get_train_transforms(image_size=config.IMAGE_SIZE, p=config.AUGMENT_PROB)
+    val_transform = get_val_transforms(image_size=config.IMAGE_SIZE)
+
+    # Передаем их в датасет
     train_dataset = TrainPhotosDataset(
         data_list=train_list,
-        transforms=[RandomHorizontal(p), RandomCrop(p), RandomBright(p)]
+        transforms=train_transform  # Передаем единый объект, а не список
     )
-    test_dataset = TrainPhotosDataset(data_list=test_list)
+
+    test_dataset = TrainPhotosDataset(
+        data_list=test_list,
+        transforms=val_transform    # Тестовому датасету тоже нужен transform (для Resize и нормализации)
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS, shuffle=False)
@@ -212,6 +221,19 @@ def main():
         model = ForgeryDetectionModel(encoder_name=config.SMP_ENCODER, num_classes=config.NUM_CLASSES)
         log_name = f"SMP_{config.SMP_ENCODER}"
         
+    elif config.MODEL_NAME == "BiRefNet":
+        print("Используется тяжелая архитектура BiRefNet")
+        model = BiRefNetForgeryModel()
+        log_name = "BiRefNet_SOTA"
+    
+    elif config.MODEL_NAME == "ViT_Seg":
+        print("Инициализация кастомной модели ViT для сегментации...")
+        model = ViTSegmentation().to(config.DEVICE)
+        
+        # Для бинарной сегментации (когда мы предсказываем маску 1 класса) 
+        # BCEWithLogitsLoss — это золотой стандарт.
+        criterion = torch.nn.BCEWithLogitsLoss()
+
     else:
         raise ValueError(f"Неизвестное имя модели в конфиге: {config.MODEL_NAME}")
         

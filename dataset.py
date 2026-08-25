@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.io import read_image
 import torchvision.transforms.functional as F_vision
+import cv2
 
 import config
 
@@ -130,28 +131,25 @@ class TrainPhotosDataset(Dataset):
     def __getitem__(self, idx):
         img_path, mask_path = self.data_list[idx]
 
-        # Загрузка изображений с диска
-        image = read_image(img_path)
-        mask = read_image(mask_path)
+        # 1. Загрузка изображений через OpenCV (стандарт для Albumentations)
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) # Обязательно: перевод из BGR в RGB
 
-        # ПРИНУДИТЕЛЬНЫЙ РЕСАЙЗ ИЗ КОНФИГА
-        image = F_vision.resize(image, config.IMAGE_SIZE, antialias=True)
-        mask = F_vision.resize(mask, config.IMAGE_SIZE, interpolation=F_vision.InterpolationMode.NEAREST)
+        # Маску грузим сразу в черно-белом формате (один канал, форма: H x W)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
-        # Перевод в float32 и нормализация в диапазон [0, 1]
-        image = image.float() / 255.0
-        mask = mask.float() / 255.0
+        # 2. Применение ВСЕГО пайплайна одним разом
+        # (Ресайз, аугментации, нормализация и перевод в тензор происходят прямо тут)
+        if self.transforms is not None:
+            augmented = self.transforms(image=image, mask=mask)
+            image = augmented['image']
+            mask = augmented['mask']
 
-        # Нормализация ImageNet
-        image = F_vision.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-        # Подготовка маски
-        if mask.shape[0] > 1:
-            mask = mask[0:1, ...] 
-        mask = (mask > 0.5).float()
-
-        # Применение аугментаций
-        for transform in self.transforms:
-            image, mask = transform(image, mask)
+        # 3. Финальная подготовка маски
+        # После ToTensorV2 маска имеет размер (H, W). Нейросети нужен размер (1, H, W).
+        mask = mask.unsqueeze(0) 
+        
+        # Бинаризация маски (значения строго 0 или 1) и перевод во float
+        mask = (mask > 0).float()
 
         return image, mask

@@ -38,7 +38,7 @@ THRESHOLD = 0.8 # Порог для метрики AIC Score
 # НАСТРОЙКИ АРХИТЕКТУРЫ
 # ==========================================
 # Варианты: "CustomUNet" (ваша сборка на VGG13) или "SMP" (быстрые сети)
-MODEL_NAME = "SMP" 
+MODEL_NAME = "BiRefNet"
 
 # Если выбрали "SMP", какой энкодер использовать? (варианты: "mit_b0", "efficientnet-b0")
 SMP_ENCODER = "mit_b0" 
