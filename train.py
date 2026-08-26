@@ -53,6 +53,7 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         self.cloud_manager = cloud_manager
+        self.scaler = torch.amp.GradScaler('cuda')
 
         self.writer = SummaryWriter(log_dir) if log_dir else None
         self.global_step = 0
@@ -115,29 +116,38 @@ class Trainer:
     def _train_epoch(self, epoch):
         self.model.train()
         total_loss = 0
-
+        
         # tqdm с выводом Loss в реальном времени
         pbar = tqdm(self.train_loader, desc="Обучение")
         for X, y in pbar:
             X, y = X.to(self.device), y.to(self.device)
-
-            pred = self.model(X)
-            loss = self.loss_fn(pred, y)
-
+            
             self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
+            
+            # 1. Безопасная зона смешанной точности (AMP)
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                pred = self.model(X)
+                loss = self.loss_fn(pred, y)
+            
+            # 2. Масштабируем Loss и считаем градиенты
+            self.scaler.scale(loss).backward()
+            
+            # 3. Отменяем масштаб и обрезаем градиенты (защита от взрыва NaN)
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            # 4. Делаем шаг оптимизатора и обновляем масштабатор
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            
             total_loss += loss.item()
             pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
-
+            
             if self.writer:
                 with torch.no_grad():
-                    self.writer.add_scalar(
-                        "Loss/train_step", loss.item(), self.global_step
-                    )
+                    self.writer.add_scalar('Loss/train_step', loss.item(), self.global_step)
                     self.global_step += 1
-
+                    
         return total_loss / len(self.train_loader)
 
     def _validate_epoch(self, epoch):
@@ -311,6 +321,7 @@ def main():
     elif config.MODEL_NAME == "BiRefNet":
         print("Используется тяжелая архитектура BiRefNet")
         model = BiRefNetForgeryModel()
+        model = model.float()
         log_name = "BiRefNet_SOTA"
 
     elif config.MODEL_NAME == "ViT_Seg":

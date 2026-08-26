@@ -276,23 +276,53 @@ class BiRefNetForgeryModel(nn.Module):
         noise = self.srm(x)
         x_combined = torch.cat([x, noise], dim=1)
         
-        # Адаптируем под 3 канала (пока это float32)
         x_adapted = self.input_adapter(x_combined)
         
-        # [ИСПРАВЛЕНИЕ]: Узнаем, в каком формате веса у BiRefNet (float16), 
-        # и принудительно переводим нашу картинку в этот же формат
-        model_dtype = next(self.model.parameters()).dtype
-        x_adapted = x_adapted.to(dtype=model_dtype)
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            preds = self.model(x_adapted)
         
-        # Теперь форматов конфликта не будет
-        preds = self.model(x_adapted)
-        
-        if isinstance(preds, (list, tuple)):
-            return preds[0]
-        elif isinstance(preds, dict):
-            return preds['preds']
+        # 1. Распаковка словаря (если есть)
+        if isinstance(preds, dict):
+            preds = preds.get('preds', list(preds.values())[0])
             
-        return preds
+        # 2. Поиск тензора с максимальным разрешением
+        if isinstance(preds, (list, tuple)):
+            best_pred = None
+            max_pixels = -1
+            
+            # Функция для разворачивания любой вложенности (tuple в tuple и т.д.)
+            def flatten(nested):
+                for item in nested:
+                    if isinstance(item, (list, tuple)):
+                        yield from flatten(item)
+                    elif isinstance(item, torch.Tensor):
+                        yield item
+
+            # Ищем самую большую маску
+            for tensor in flatten([preds]):
+                if tensor.ndim >= 2:
+                    pixels = tensor.shape[-1] * tensor.shape[-2] # H * W
+                    if pixels > max_pixels:
+                        max_pixels = pixels
+                        best_pred = tensor
+                        
+            final_pred = best_pred
+        else:
+            final_pred = preds
+            
+        # 3. Финальная страховка: точная подгонка размера под входную картинку x
+        # Если модель вернула маску 512x512, этот код ничего не изменит.
+        # Но если есть расхождение даже в 1 пиксель, он его исправит.
+        if final_pred.shape[-2:] != x.shape[-2:]:
+            import torch.nn.functional as F
+            final_pred = F.interpolate(
+                final_pred, 
+                size=x.shape[-2:], 
+                mode='bilinear', 
+                align_corners=False
+            )
+            
+        return final_pred.float()
 
 
 class ViTSegmentation(nn.Module):

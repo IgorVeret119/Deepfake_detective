@@ -131,25 +131,31 @@ class TrainPhotosDataset(Dataset):
     def __getitem__(self, idx):
         img_path, mask_path = self.data_list[idx]
 
-        # 1. Загрузка изображений через OpenCV (стандарт для Albumentations)
+        # 1. Загрузка строго через OpenCV (возвращает numpy array)
+        # Добавляем проверку на битые файлы, чтобы код не падал, если картинки нет
         image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) # Обязательно: перевод из BGR в RGB
-
-        # Маску грузим сразу в черно-белом формате (один канал, форма: H x W)
+        if image is None:
+            raise FileNotFoundError(f"OpenCV не смог прочитать картинку по пути: {img_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise FileNotFoundError(f"OpenCV не смог прочитать маску по пути: {mask_path}")
 
-        # 2. Применение ВСЕГО пайплайна одним разом
-        # (Ресайз, аугментации, нормализация и перевод в тензор происходят прямо тут)
+        # 2. Выравнивание размеров (наш предыдущий фикс)
+        if image.shape[:2] != mask.shape[:2]:
+            mask = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        # 3. Применение аугментаций (Albumentations сам переведет numpy в Tensor в конце)
         if self.transforms is not None:
             augmented = self.transforms(image=image, mask=mask)
             image = augmented['image']
             mask = augmented['mask']
-
-        # 3. Финальная подготовка маски
-        # После ToTensorV2 маска имеет размер (H, W). Нейросети нужен размер (1, H, W).
-        mask = mask.unsqueeze(0) 
-        
-        # Бинаризация маски (значения строго 0 или 1) и перевод во float
+            
+        # ... остальной код подготовки маски ...
+        # После transforms mask уже имеет нужный размер, нужно только добавить измерение 
+        # и перевести во float32
+        mask = mask.unsqueeze(0)
         mask = (mask > 0).float()
 
         return image, mask
