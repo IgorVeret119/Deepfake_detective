@@ -6,6 +6,7 @@ from torchvision.models import vgg13, VGG13_Weights
 import segmentation_models_pytorch as smp
 from transformers import AutoModelForImageSegmentation
 import timm
+from transformers import SegformerForSemanticSegmentation
 
 class SRMLayer(nn.Module):
     """
@@ -324,7 +325,6 @@ class BiRefNetForgeryModel(nn.Module):
             
         return final_pred.float()
 
-
 class ViTSegmentation(nn.Module):
     def __init__(self):
         super().__init__()
@@ -364,3 +364,152 @@ class ViTSegmentation(nn.Module):
         # 4. Пропускаем через декодер для получения маски 384x384
         mask = self.decoder(spatial_features)
         return mask
+
+class EfficientNetDeepLabForgeryModel(nn.Module):
+    """
+    Интеграция EfficientNet-B2 + DeepLabV3+ с нашим SRM-фильтром.
+    """
+    def __init__(self):
+        super().__init__()
+        # Предполагается, что SRMLayer у вас уже определен
+        self.srm = SRMLayer()
+        
+        # Адаптер: сжимает 6 каналов (3 RGB + 3 Шум) в 3 канала для EfficientNet
+        self.input_adapter = nn.Conv2d(6, 3, kernel_size=1)
+        
+        # Загружаем DeepLabV3+ с кодировщиком efficientnet-b2 из SMP
+        self.model = smp.DeepLabV3Plus(
+            encoder_name="efficientnet-b2",     # Используем EfficientNet-B2
+            encoder_weights="imagenet",         # Предобученные веса
+            in_channels=3,                      # На вход идет 3 канала после адаптера
+            classes=1                           # На выходе 1 канал (маска дипфейка)
+        )
+
+    def forward(self, x):
+        # 1. Извлекаем шум и объединяем с оригиналом
+        noise = self.srm(x)
+        x_combined = torch.cat([x, noise], dim=1)
+        
+        # 2. Адаптируем каналы (6 -> 3)
+        x_adapted = self.input_adapter(x_combined)
+        
+        # 3. Прогон через модель в смешанной точности (AMP)
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            preds = self.model(x_adapted)
+            
+        return preds.float()
+
+class ConvNeXtFPNForgeryModel(nn.Module):
+    """
+    Интеграция ConvNeXt-Femto + FPN с нашим SRM-фильтром шумов.
+    """
+    def __init__(self):
+        super().__init__()
+        # Наш неизменный SRM-фильтр для поиска цифровых шумов
+        self.srm = SRMLayer()
+        
+        # Адаптер: сжимает 6 каналов (3 RGB + 3 Шум) в 3 канала для кодировщика
+        self.input_adapter = nn.Conv2d(6, 3, kernel_size=1)
+        
+        # Загружаем FPN с кодировщиком ConvNeXt-Femto (через timm-интеграцию)
+        # Убедитесь, что у вас установлены актуальные версии timm и segmentation-models-pytorch
+        self.model = smp.FPN(
+            encoder_name="tu-convnext_femto",   # Легковесный и мощный ConvNeXt (около 5M параметров)
+            encoder_weights="imagenet",         # Предобученные веса
+            in_channels=3,                      # На вход идет 3 канала после адаптера
+            classes=1                           # На выходе 1 канал (маска подделки)
+        )
+
+    def forward(self, x):
+        # 1. Извлекаем шум и объединяем с оригиналом
+        noise = self.srm(x)
+        x_combined = torch.cat([x, noise], dim=1)
+        
+        # 2. Адаптируем каналы (6 -> 3)
+        x_adapted = self.input_adapter(x_combined)
+        
+        # 3. Прогон через модель в смешанной точности (AMP)
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            preds = self.model(x_adapted)
+            
+        return preds.float()
+class SegFormerForgeryModel(nn.Module):
+    """
+    Интеграция легкой модели SegFormer-B0 с нашим SRM-фильтром.
+    """
+    def __init__(self):
+        super().__init__()
+        # Предполагается, что SRMLayer у вас уже определен где-то в коде
+        self.srm = SRMLayer()
+        
+        # Адаптер: сжимает 6 каналов (3 RGB + 3 Шум) в 3 канала для SegFormer
+        self.input_adapter = nn.Conv2d(6, 3, kernel_size=1)
+        
+        # Загружаем SegFormer-B0
+        self.model = SegformerForSemanticSegmentation.from_pretrained(
+            "nvidia/mit-b0", 
+            num_labels=1, # Нам нужен 1 канал на выходе (маска подделки)
+            ignore_mismatched_sizes=True
+        )
+
+    def forward(self, x):
+        # 1. Извлекаем шум и склеиваем с оригиналом
+        noise = self.srm(x)
+        x_combined = torch.cat([x, noise], dim=1)
+        
+        # 2. Адаптируем каналы (6 -> 3)
+        x_adapted = self.input_adapter(x_combined)
+        
+        # 3. Прогон через модель
+        # transformers ожидает аргумент по имени 'pixel_values'
+        with torch.autocast(device_type='cuda', dtype=torch.float16):
+            outputs = self.model(pixel_values=x_adapted)
+            
+        # У SegFormer предсказания всегда лежат в атрибуте logits
+        logits = outputs.logits
+        
+        # 4. ОБЯЗАТЕЛЬНО: Возвращаем оригинальный размер
+        # SegFormer выдает размер H/4, W/4. Растягиваем обратно до размеров x.
+        final_pred = F.interpolate(
+            logits, 
+            size=x.shape[-2:], # берем высоту и ширину из исходной картинки
+            mode='bilinear', 
+            align_corners=False
+        )
+            
+        return final_pred.float()
+
+class DeepfakeEnsemble(nn.Module):
+    """
+    Ансамбль из трех моделей.
+    Усредняет вероятности (Soft Voting) для получения более стабильной итоговой маски.
+    """
+    def __init__(self, model_eff, model_conv, model_seg, weights=(1/3, 1/3, 1/3)):
+        super().__init__()
+        self.model_eff = model_eff
+        self.model_conv = model_conv
+        self.model_seg = model_seg
+        
+        # Нормализуем веса, чтобы в сумме они давали 1.0
+        sum_weights = sum(weights)
+        self.w1 = weights[0] / sum_weights
+        self.w2 = weights[1] / sum_weights
+        self.w3 = weights[2] / sum_weights
+
+    def forward(self, x):
+        # Ансамбль обычно используется только для инференса, поэтому отключаем градиенты
+        with torch.no_grad():
+            # Получаем сырые логиты от каждой модели
+            logits_eff = self.model_eff(x)
+            logits_conv = self.model_conv(x)
+            logits_seg = self.model_seg(x)
+            
+            # Переводим логиты в вероятности (от 0 до 1)
+            prob_eff = torch.sigmoid(logits_eff)
+            prob_conv = torch.sigmoid(logits_conv)
+            prob_seg = torch.sigmoid(logits_seg)
+            
+            # Взвешенное усреднение масок
+            ensemble_prob = (prob_eff * self.w1) + (prob_conv * self.w2) + (prob_seg * self.w3)
+            
+        return ensemble_prob

@@ -1,5 +1,6 @@
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import cv2
 
 def get_train_transforms(image_size, p):
     """
@@ -10,15 +11,21 @@ def get_train_transforms(image_size, p):
         # ==========================================
         # 1. ГЕОМЕТРИЯ (Искажает и картинку, и маску)
         # ==========================================
-        A.HorizontalFlip(p=p),
-        A.ShiftScaleRotate(shift_limit=0.06, scale_limit=0.1, rotate_limit=15, border_mode=0, p=p),
-        
-        # Симуляция "кривого" наложения лица (эффект кривого зеркала)
         A.OneOf([
-            A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
-            A.OpticalDistortion(distort_limit=0.1, shift_limit=0.1, p=1.0),
-            A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=1.0)
-        ], p=p * 0.5), # Делаем реже, чтобы не искажать слишком сильно
+            A.HorizontalFlip(p=1.0),
+            A.Affine(
+                scale=(0.9, 1.1), 
+                translate_percent=(-0.06, 0.06), 
+                rotate=(-15, 15), 
+                border_mode=cv2.BORDER_REFLECT_101, # <-- Магия здесь!
+                fill_mask=0, # Для маски пустоты строго заливаем нулями (черным)
+                p=1.0
+            ),
+            # Симуляция "кривого" наложения лица (эффект кривого зеркала)
+            A.GridDistortion(num_steps=5, distort_limit=0.25, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0, p=1.0),
+            A.OpticalDistortion(distort_limit=0.1, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0, p=1.0),
+            A.ElasticTransform(alpha=20, sigma=4, border_mode=cv2.BORDER_REFLECT_101, fill_mask=0, p=1.0)
+        ], p=p * 0.7), # Делаем реже, чтобы не искажать слишком сильно
 
         # ==========================================
         # 2. ЦВЕТ И ОСВЕЩЕНИЕ
@@ -35,31 +42,26 @@ def get_train_transforms(image_size, p):
         # 3. ДЕГРАДАЦИЯ (Шумы, блюр, интернет-сжатие)
         # ==========================================
         A.OneOf([
-            A.ImageCompression(quality_lower=50, quality_upper=95, p=1.0), # Сжатие мессенджеров
-            A.Downscale(scale_min=0.5, scale_max=0.9, p=1.0), # Симуляция апскейла (низкого разрешения)
-        ], p=p),
-        
-        A.OneOf([
-            A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+            A.ImageCompression(quality_range=(65, 95), p=1.0), # Сжатие мессенджеров
+            A.Downscale(scale_range=(0.8, 0.9), p=1.0), # Симуляция апскейла (низкого разрешения)
+            A.GaussNoise(std_range=(0.01, 0.03), p=1.0),
             A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0), # Шум матрицы камеры
             A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=1.0),
-        ], p=p * 0.8),
-        
-        A.OneOf([
             A.MotionBlur(blur_limit=5, p=1.0), # Смаз от движения
             A.GaussianBlur(blur_limit=(3, 7), p=1.0), # Расфокус
             A.GlassBlur(max_delta=1, iterations=1, p=1.0), # Эффект "битых" пикселей/линзы
-        ], p=p * 0.5),
+        ], p=p * 0.6),
 
         # ==========================================
         # 4. УМНОЕ УДАЛЕНИЕ ЧАСТЕЙ (Cutout / CoarseDropout)
         # ==========================================
         # Вырезает от 2 до 8 черных квадратов. Заставляет модель смотреть на всё лицо, а не только на глаза.
         A.CoarseDropout(
-            max_holes=8, max_height=64, max_width=64,
-            min_holes=2, min_height=16, min_width=16,
-            fill_value=0, 
-            mask_fill_value=0, # КРИТИЧНО ВАЖНО: Если мы вырезали кусок лица, маска там тоже становится нулевой!
+            num_holes_range=(2, 8),        # Замена min_holes и max_holes
+            hole_height_range=(16, 64),    # Замена min_height и max_height
+            hole_width_range=(16, 64),     # Замена min_width и max_width
+            fill=0,                        # Замена fill_value
+            fill_mask=0,                   # Замена mask_fill_value
             p=p
         ),
 

@@ -19,6 +19,9 @@ from models.unet import (
     ForgeryDetectionModel,
     UNet,
     ViTSegmentation,
+    ConvNeXtFPNForgeryModel,
+    EfficientNetDeepLabForgeryModel,
+    SegFormerForgeryModel, 
 )
 from utils.augmentations import get_train_transforms, get_val_transforms
 from utils.cloud import CloudManager
@@ -64,6 +67,14 @@ class Trainer:
         print(f"Начало обучения на {epochs} эпох...")
         self._log_predictions(step=self.global_step)
 
+        if self.writer:
+            try:
+                # Создаем пустой тензор с правильными размерами из конфига
+                dummy_input = torch.randn(1, 3, config.IMAGE_SIZE[0], config.IMAGE_SIZE[1]).to(self.device)
+                self.writer.add_graph(self.model, dummy_input)
+            except Exception as e:
+                print(f"[!] Не удалось записать граф модели: {e}")
+        
         for epoch in range(start_epoch, start_epoch + epochs):
             print(f"\nЭпоха {epoch + 1}/{start_epoch + epochs}")
             train_loss = self._train_epoch(epoch)
@@ -129,25 +140,34 @@ class Trainer:
                 pred = self.model(X)
                 loss = self.loss_fn(pred, y)
             
-            # 2. Масштабируем Loss и считаем градиенты
-            self.scaler.scale(loss).backward()
+            # 2. Считаем градиенты напрямую (без масштабирования)
+            loss.backward()
             
-            # 3. Отменяем масштаб и обрезаем градиенты (защита от взрыва NaN)
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            # 3. Обрезаем градиенты (защита от взрыва NaN)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             
-            # 4. Делаем шаг оптимизатора и обновляем масштабатор
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            # 4. Делаем шаг оптимизатора
+            self.optimizer.step()
             
             total_loss += loss.item()
-            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+            pbar.set_postfix({
+                "Loss": f"{loss.item():.4f}", 
+                "Grad": f"{grad_norm.item():.4f}"
+            })
             
             if self.writer:
                 with torch.no_grad():
                     self.writer.add_scalar('Loss/train_step', loss.item(), self.global_step)
                     self.global_step += 1
-                    
+        
+        if self.writer:
+            for name, param in self.model.named_parameters():
+                # Логируем сами веса
+                self.writer.add_histogram(f'Weights/{name}', param, epoch)
+                
+                # Логируем градиенты (если они есть)
+                if param.grad is not None:
+                    self.writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
         return total_loss / len(self.train_loader)
 
     def _validate_epoch(self, epoch):
@@ -331,6 +351,21 @@ def main():
         # Для бинарной сегментации (когда мы предсказываем маску 1 класса)
         # BCEWithLogitsLoss — это золотой стандарт.
         criterion = torch.nn.BCEWithLogitsLoss()
+    
+    elif config.MODEL_NAME == "EfficientNet":
+        print("Инициализация EfficientNet-B2 + DeepLabV3+...")
+        model = EfficientNetDeepLabForgeryModel()
+        log_name = "EfficientNet_DeepLabV3"
+
+    elif config.MODEL_NAME == "ConvNeXt":
+        print("Инициализация ConvNeXt-Femto + FPN...")
+        model = ConvNeXtFPNForgeryModel()
+        log_name = "ConvNeXt_FPN"
+
+    elif config.MODEL_NAME == "SegFormer":
+        print("Инициализация SegFormer-B0...")
+        model = SegFormerForgeryModel()
+        log_name = "SegFormer_B0"
 
     else:
         raise ValueError(f"Неизвестное имя модели в конфиге: {config.MODEL_NAME}")
