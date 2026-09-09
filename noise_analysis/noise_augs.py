@@ -1,9 +1,12 @@
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Literal
 
 import cv2
 import numpy as np
+from PIL import Image
 from scipy.ndimage import gaussian_filter
 from sklearn.base import BaseEstimator, TransformerMixin
+from tqdm import tqdm
 
 
 class BaseFilter(BaseEstimator, TransformerMixin):
@@ -137,7 +140,7 @@ class NoiseExtractor(BaseFilter):
         X_filtered = self.filter.transform(X)
 
         if self.color_basis == "ycbcr" and self.inverse_transform:
-            X = cv2.cvtColor(X_filtered, cv2.COLOR_YCrCb2RGB)
+            X = cv2.cvtColor(X, cv2.COLOR_YCrCb2RGB)
             X_filtered = cv2.cvtColor(X_filtered, cv2.COLOR_YCrCb2RGB)
 
         # prevent overflow
@@ -150,3 +153,67 @@ class NoiseExtractor(BaseFilter):
         else:
             noise = np.abs(X_diff)
         return noise
+
+
+def noise_per_pixel(img_noise, mask=None):
+    img_noise = np.asarray(img_noise)
+
+    if mask is not None:
+        mask = np.asarray(mask)
+        if mask.ndim == 3:
+            mask = mask.max(axis=-1)
+        mask = mask > 0
+
+        area = mask.sum()
+        if area == 0:
+            return 0.0
+        return img_noise[mask].sum() / area
+
+    area = img_noise.shape[0] * img_noise.shape[1]
+    return img_noise.sum() / area
+
+
+def _process_one_noise_calc(args):
+    img_path, gt_path, noise_extractor = args
+    img = Image.open(img_path)
+    mask = Image.open(gt_path)
+
+    if img.size[:2] != mask.size[:2]:
+        print(
+            f"Warning: different image and mask sizes: {img.size} vs {mask.size}. Skipped."
+        )
+        return None
+
+    noise = noise_extractor.transform(img)
+    mask_noise = noise_per_pixel(noise, mask=mask)
+    img_noise = noise_per_pixel(noise)
+    return mask_noise, img_noise
+
+
+def dataset_noise(data_list: list[tuple], noise_extractor=None, max_workers=None):
+    if noise_extractor is None:
+        noise_extractor = NoiseExtractor()
+
+    mask_noise_sum = 0.0
+    img_noise_sum = 0.0
+    processed = 0
+
+    tasks = [(img_path, gt_path, noise_extractor) for img_path, gt_path in data_list]
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_process_one_noise_calc, task) for task in tasks]
+
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Noise calculation"
+        ):
+            result = future.result()
+            if result is not None:
+                mask_noise, img_noise = result
+                mask_noise_sum += mask_noise
+                img_noise_sum += img_noise
+                processed += 1
+
+    if processed == 0:
+        return (0, 0)
+
+    return mask_noise_sum / processed, img_noise_sum / processed

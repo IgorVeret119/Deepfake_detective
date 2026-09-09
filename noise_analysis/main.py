@@ -7,7 +7,14 @@ from PIL import Image
 
 from train import get_data_list
 
-from .noise_augs import FourierFilter, GaussianFilter, MedianFilter, NoiseExtractor
+from .noise_augs import (
+    FourierFilter,
+    GaussianFilter,
+    MedianFilter,
+    NoiseExtractor,
+    dataset_noise,
+    noise_per_pixel,
+)
 from .vis import plot_img_list, plot_img_noise
 
 
@@ -38,5 +45,16 @@ def test_filter(
 
 if __name__ == "__main__":
     data_list = get_data_list()
-    img_path, gt_path = data_list[0]
-    test_filter(img_path, gt_path, filters=[FourierFilter(sigma=200)])
+    img_path, gt_path = data_list[1]
+
+    # test_filter(img_path, gt_path, filters=[FourierFilter(sigma=200)])
+
+    # filter = FourierFilter(sigma=400)
+    # filter = GaussianFilter(sigma=0.5)
+    filter = MedianFilter(kernel_size=3)
+    noise_extractor = NoiseExtractor(filter=filter, color_basis="ycbcr")
+
+    res = dataset_noise(data_list[:10000], noise_extractor=noise_extractor)
+    print("mean mask noise:", res[0])
+    print("mean img noise:", res[1])
+    print("mask_noise / img_noise:", res[0] / res[1])
